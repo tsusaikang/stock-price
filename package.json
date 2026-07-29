@@ -1,0 +1,13 @@
+{
+  "name": "stock-price",
+  "version": "1.0.0",
+  "description": "한국 주식 급등/급락 한눈에 보기",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": "22.x"
+  }
+}

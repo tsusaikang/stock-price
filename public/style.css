@@ -1,0 +1,217 @@
+/* 국내 관행대로 상승=빨강, 하락=파랑 */
+:root {
+  --bg: #f5f6f8;
+  --card: #fff;
+  --line: #e6e8ec;
+  --text: #14161a;
+  --dim: #6b7280;
+  --faint: #9aa1ad;
+  --up: #e4442f;
+  --down: #1263e2;
+  --accent: #14161a;
+  --star: #f5a623;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .05);
+  --radius: 14px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1013;
+    --card: #181b20;
+    --line: #262a31;
+    --text: #e8eaee;
+    --dim: #9aa1ad;
+    --faint: #6b7280;
+    --up: #ff5b47;
+    --down: #4d93ff;
+    --accent: #e8eaee;
+    --shadow: none;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Pretendard", "Apple SD Gothic Neo",
+        "Malgun Gothic", system-ui, sans-serif;
+  -webkit-text-size-adjust: 100%;
+  overscroll-behavior-y: none;
+}
+
+main { max-width: 760px; margin: 0 auto; padding: 0 12px 48px; }
+
+/* ── 상단 ─────────────────────────────────────── */
+.topbar {
+  position: sticky; top: 0; z-index: 30;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: saturate(180%) blur(12px);
+  border-bottom: 1px solid var(--line);
+  padding: env(safe-area-inset-top) 12px 10px;
+}
+.topbar-inner {
+  max-width: 736px; margin: 0 auto;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 0 8px;
+}
+.topbar h1 { font-size: 17px; font-weight: 700; margin: 0; letter-spacing: -.02em; }
+
+.icon-btn {
+  border: 1px solid var(--line); background: var(--card); color: var(--dim);
+  width: 34px; height: 34px; border-radius: 10px; font-size: 16px;
+  cursor: pointer; transition: transform .3s;
+}
+.icon-btn:active { transform: rotate(180deg); }
+.icon-btn.spin { animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.search-wrap { position: relative; max-width: 736px; margin: 0 auto; }
+#search {
+  width: 100%; padding: 11px 14px; font-size: 15px;
+  border: 1px solid var(--line); border-radius: 11px;
+  background: var(--card); color: var(--text);
+}
+#search:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+.suggest {
+  position: absolute; top: calc(100% + 6px); left: 0; right: 0; z-index: 40;
+  margin: 0; padding: 4px; list-style: none;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, .12);
+  max-height: 55vh; overflow-y: auto;
+}
+.suggest li {
+  padding: 10px 12px; border-radius: 8px; cursor: pointer;
+  display: flex; gap: 8px; align-items: baseline;
+}
+.suggest li:hover, .suggest li[aria-selected="true"] { background: var(--bg); }
+.suggest .mk { font-size: 11px; color: var(--faint); }
+
+/* ── 지수 ─────────────────────────────────────── */
+.indices { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 14px 0; }
+.idx {
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 12px 14px; box-shadow: var(--shadow);
+}
+.idx .nm { font-size: 12px; color: var(--dim); }
+.idx .pv { font-size: 21px; font-weight: 700; letter-spacing: -.03em; margin-top: 2px; }
+.idx .ch { font-size: 12.5px; font-weight: 600; }
+
+/* ── 블록/탭 ───────────────────────────────────── */
+.block { margin-bottom: 18px; }
+.block > h2 {
+  font-size: 13px; color: var(--dim); font-weight: 600;
+  margin: 0 0 8px 4px; letter-spacing: -.01em;
+}
+
+.tabs {
+  display: flex; gap: 4px; margin-bottom: 10px;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 12px; padding: 4px;
+}
+.tabs button {
+  flex: 1; padding: 9px 0; border: 0; border-radius: 9px;
+  background: transparent; color: var(--dim);
+  font-size: 14px; font-weight: 600; cursor: pointer;
+  font-family: inherit;
+}
+.tabs button.on { background: var(--accent); color: var(--card); }
+
+/* ── 목록 ─────────────────────────────────────── */
+.list {
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow);
+}
+.row {
+  display: grid;
+  grid-template-columns: 22px 1fr 62px auto;
+  align-items: center; gap: 10px;
+  padding: 11px 13px; cursor: pointer;
+  border-top: 1px solid var(--line);
+}
+.list > .row:first-child, .row:first-child { border-top: 0; }
+.row:active { background: var(--bg); }
+.row .rank { font-size: 12px; color: var(--faint); text-align: center; font-variant-numeric: tabular-nums; }
+.row .nm { font-weight: 600; letter-spacing: -.02em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .mk { font-size: 11px; color: var(--faint); font-weight: 400; margin-left: 5px; }
+.row .spark { width: 62px; height: 26px; display: block; }
+.row .right { text-align: right; min-width: 96px; }
+.row .pv { font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+.row .ch { font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.row.open { background: var(--bg); }
+
+.tag {
+  font-size: 10px; font-weight: 700; padding: 1px 5px;
+  border-radius: 4px; margin-left: 5px; vertical-align: 1px;
+}
+.tag.up { background: var(--up); color: #fff; }
+.tag.down { background: var(--down); color: #fff; }
+
+.up { color: var(--up); }
+.down { color: var(--down); }
+.flat { color: var(--dim); }
+
+/* ── 상세 ─────────────────────────────────────── */
+.detail { border-top: 1px solid var(--line); background: var(--bg); padding: 14px 13px 16px; }
+.detail-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.ranges { display: flex; gap: 5px; }
+.ranges button {
+  padding: 5px 11px; font-size: 12.5px; font-weight: 600; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--card); color: var(--dim); font-family: inherit;
+}
+.ranges button.on { background: var(--accent); color: var(--card); border-color: var(--accent); }
+
+.star { border: 0; background: none; font-size: 21px; cursor: pointer; color: var(--faint); line-height: 1; padding: 0 2px; }
+.star.on { color: var(--star); }
+
+.chart-box { position: relative; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 8px 4px 4px; }
+.chart-box svg { display: block; width: 100%; height: auto; touch-action: pan-y; }
+.readout {
+  position: absolute; top: 8px; left: 12px; font-size: 11.5px;
+  color: var(--dim); font-variant-numeric: tabular-nums; pointer-events: none;
+  background: color-mix(in srgb, var(--card) 85%, transparent); padding: 2px 5px; border-radius: 5px;
+}
+
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; margin-top: 10px; }
+.stats > div { background: var(--card); border: 1px solid var(--line); border-radius: 9px; padding: 7px 9px; }
+.stats .k { font-size: 10.5px; color: var(--faint); }
+.stats .v { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+
+.rel { margin-top: 14px; }
+.rel h3 {
+  font-size: 12px; color: var(--dim); font-weight: 600; margin: 0 0 7px;
+  display: flex; align-items: baseline; gap: 6px;
+}
+.rel h3 small { font-weight: 400; color: var(--faint); font-size: 11px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  display: inline-flex; align-items: baseline; gap: 6px;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 999px; padding: 6px 11px; font-size: 13px; cursor: pointer;
+  font-family: inherit; color: var(--text);
+}
+.chip:active { background: var(--bg); }
+.chip .r { font-size: 11px; font-variant-numeric: tabular-nums; }
+.chip .c { font-size: 10.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+
+.muted { color: var(--faint); font-size: 12.5px; padding: 4px 0; }
+.foot { text-align: center; color: var(--faint); font-size: 11.5px; line-height: 1.7; margin-top: 24px; }
+.skel { padding: 34px 0; text-align: center; color: var(--faint); font-size: 13px; }
+.err { padding: 20px; text-align: center; color: var(--up); font-size: 13px; }
+
+/* 폰 폭에서도 스파크라인은 살린다 — 한눈에 흐름을 보는 게 이 화면의 목적. */
+@media (max-width: 430px) {
+  .row { grid-template-columns: 18px 1fr 44px auto; gap: 8px; padding: 11px 11px; }
+  .row .spark { width: 44px; }
+  .row .right { min-width: 86px; }
+  .row .mk { display: none; }
+}
+
+@media (max-width: 330px) {
+  .row { grid-template-columns: 18px 1fr auto; }
+  .row .spark { display: none; }
+  .stats { grid-template-columns: repeat(2, 1fr); }
+}

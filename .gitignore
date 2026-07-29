@@ -1,0 +1,8 @@
+node_modules/
+.DS_Store
+*.log
+.env
+.env.*
+
+# 이 맥에서만 쓰는 Claude Code 권한 설정 (공유 대상 아님)
+.claude/settings.local.json

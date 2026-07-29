@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>오늘 뭐가 튀었나</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📈</text></svg>">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <h1>오늘 뭐가 튀었나</h1>
+    <button id="refresh" class="icon-btn" title="새로고침" aria-label="새로고침">↻</button>
+  </div>
+  <div class="search-wrap">
+    <input id="search" type="search" placeholder="종목명 검색 (예: 삼성전자, 두산)"
+           autocomplete="off" enterkeyhint="search" aria-label="종목 검색">
+    <ul id="suggest" class="suggest" hidden></ul>
+  </div>
+</header>
+
+<main id="app">
+  <section id="indices" class="indices"></section>
+  <section id="searched" class="block" hidden></section>
+  <section id="favs" class="block" hidden></section>
+
+  <section class="block">
+    <nav class="tabs" id="tabs" role="tablist">
+      <button data-tab="up"    class="on" role="tab">급등</button>
+      <button data-tab="down"  role="tab">급락</button>
+      <button data-tab="issue" role="tab">이슈</button>
+      <button data-tab="cap"   role="tab">시총</button>
+    </nav>
+    <div id="list" class="list"></div>
+  </section>
+
+  <p class="foot">
+    시세 출처 네이버 금융 · 실시간 아님(최대 1분 지연 캐시)<br>
+    <span id="updated"></span>
+  </p>
+</main>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>
