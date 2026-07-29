@@ -16,6 +16,7 @@ import {
   search,
   pool,
   clearCache,
+  upstreamLoad,
 } from './lib/naver.js';
 import { findRelated, warmUp } from './lib/related.js';
 
@@ -170,6 +171,7 @@ const routes = {
       egress,
       node: process.version,
       uptimeSec: Math.round(process.uptime()),
+      upstream: upstreamLoad(),
       checks: results,
     };
   },
@@ -205,6 +207,20 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+const PRIME_INTERVAL = 10 * 60_000;
+
+/** 후보군 일봉과 첫 화면 데이터를 미리 채워둔다. */
+async function prime(label) {
+  const t0 = Date.now();
+  try {
+    const { count } = await warmUp();
+    await routes['/api/home']();
+    console.log(`  [${label}] 후보 ${count}개 + 첫 화면 캐시 (${Date.now() - t0}ms)\n`);
+  } catch (err) {
+    console.warn(`  [${label}] 실패: ${err.message}\n`);
+  }
+}
+
 /** 같은 와이파이의 폰에서 접속할 주소 */
 function lanAddress() {
   for (const list of Object.values(networkInterfaces())) {
@@ -221,7 +237,8 @@ server.listen(PORT, () => {
   if (lan) console.log(`  폰에서    →  http://${lan}:${PORT}   (같은 와이파이)\n`);
   else console.log('');
 
-  warmUp()
-    .then(({ count, ms }) => console.log(`  [준비완료] 관련종목 후보 ${count}개 일봉 캐시 (${ms}ms)\n`))
-    .catch((e) => console.warn(`  [경고] 후보군 준비 실패: ${e.message}\n`));
+  prime('준비완료');
+  // 캐시를 계속 따뜻하게 유지한다. 비어 있을 때만 사용자가 기다리므로,
+  // 만료를 사용자 요청이 아니라 이 타이머가 먼저 맞게 한다.
+  setInterval(() => prime('갱신'), PRIME_INTERVAL).unref();
 });
