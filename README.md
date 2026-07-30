@@ -16,6 +16,8 @@ node server.js
 
 띄우면 터미널에 로컬 주소와 **같은 와이파이에서 폰으로 접속할 주소**가 같이 찍힌다.
 
+운영 중: https://stock-price-production-7ea1.up.railway.app
+
 ## 배포 (Railway)
 
 GitHub에 푸시하면 Railway가 받아서 `node server.js`를 대신 실행한다. 설정은
@@ -26,20 +28,41 @@ GitHub에 푸시하면 Railway가 받아서 `node server.js`를 대신 실행한
 3. railway.app → New Project → Deploy from GitHub repo → 저장소 선택.
 4. Settings → Networking → **Generate Domain**. `https://….up.railway.app` 주소가 나온다.
 
-### 배포하면 반드시 확인할 것
+### ⚠️ 리전을 반드시 싱가포르로 바꿀 것
 
-Railway는 해외 리전(싱가포르)에서 돌기 때문에 **네이버가 해외 IP를 막는지**가 최대
-변수다. 배포 직후 이걸 친다.
+Railway의 기본 리전은 **EU-West(네덜란드)** 다. 그냥 두면 네이버까지 왕복이 1~2초씩
+걸린다. Settings → Deploy → Region 에서 **Southeast Asia (Singapore)** 로 바꾼다.
+리전을 바꾸면 재배포가 걸리므로 새 코드도 같이 올라간다.
+
+실측 (네이버 왕복, 캐시 비운 상태):
+
+| 항목 | 싱가포르 | 네덜란드 | 서울(로컬) |
+|---|---|---|---|
+| 지수 | 385ms | 2,060ms | 33ms |
+| 랭킹 | 421ms | 2,282ms | 40ms |
+| 종목시세 | 380ms | 2,012ms | 38ms |
+| 업종비교 | 418ms | 1,036ms | 46ms |
+| 검색 | 505ms | 1,326ms | 165ms |
+| 일봉차트 | 497ms | 1,647ms | 38ms |
+
+### 배포하면 확인할 것
 
 ```bash
 curl -s https://<주소>/api/diag?fresh=1
 ```
 
-6개 엔드포인트를 실제로 때려보고 어디가 막혔는지 알려준다. `egress`에 서버가 어느
-나라에서 나가는지도 찍힌다. 서울에서 돌린 기준선은 전부 통과에 30~170ms다.
+6개 엔드포인트를 실제로 때려보고 어디가 막혔는지, `egress`에 서버가 어느 나라에서
+나가는지 알려준다. **네이버는 해외 IP를 막지 않는다** — 싱가포르·네덜란드 양쪽에서
+6개 전부 통과를 확인했다.
 
 `일봉차트`(`api.finance.naver.com`)가 실패하면 차트와 관련 종목 추천이 통째로 죽는다.
 그 경우 대안은 (1) 도쿄 리전이 있는 Fly.io로 옮기거나, (2) 일봉만 다른 소스로 바꾸는 것.
+
+### 자동 배포가 안 걸릴 때
+
+`git push` 후에도 Railway가 옛 코드를 물고 있는 경우가 있었다. Deployments 탭에서
+최신 커밋인지 확인하고, 아니면 수동 Deploy 하거나 Settings → Source에서 감시 브랜치를
+확인한다. 지금 도는 코드가 뭔지는 `/api/diag`의 응답 필드로 구분하는 게 제일 빠르다.
 
 ### 공개 URL로 열 때
 
