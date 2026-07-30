@@ -207,10 +207,43 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-const PRIME_INTERVAL = 10 * 60_000;
+const PRIME_HEAVY_MS = 10 * 60_000; // 후보군 431종목 일봉 — 무겁고 드물게
+const PRIME_LIGHT_MS = 60_000; // 지수·랭킹 — 가볍고 자주, 장중에만
 
-/** 후보군 일봉과 첫 화면 데이터를 미리 채워둔다. */
-async function prime(label) {
+/** 장이 열려 있을 만한 시간대인가 (평일 08:30~15:45 KST, 동시호가 포함) */
+function marketHours(date = new Date()) {
+  const p = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Seoul',
+      weekday: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    })
+      .formatToParts(date)
+      .map((x) => [x.type, x.value])
+  );
+  if (p.weekday === 'Sat' || p.weekday === 'Sun') return false;
+  const mins = Number(p.hour) * 60 + Number(p.minute);
+  return mins >= 510 && mins <= 945;
+}
+
+/**
+ * 첫 화면(지수·랭킹)만 다시 받는다.
+ * 이게 없으면 조용한 시간대에 캐시가 10분까지 늙어서, 화면에 찍히는
+ * "시세 시점"이 실제보다 한참 뒤처진다.
+ */
+async function primeLight() {
+  if (!marketHours()) return;
+  try {
+    await routes['/api/home']();
+  } catch {
+    /* 다음 주기에 다시 시도 */
+  }
+}
+
+/** 관련종목 후보군 일봉까지 통째로 데운다. */
+async function primeHeavy(label) {
   const t0 = Date.now();
   try {
     const { count } = await warmUp();
@@ -237,8 +270,9 @@ server.listen(PORT, () => {
   if (lan) console.log(`  폰에서    →  http://${lan}:${PORT}   (같은 와이파이)\n`);
   else console.log('');
 
-  prime('준비완료');
   // 캐시를 계속 따뜻하게 유지한다. 비어 있을 때만 사용자가 기다리므로,
-  // 만료를 사용자 요청이 아니라 이 타이머가 먼저 맞게 한다.
-  setInterval(() => prime('갱신'), PRIME_INTERVAL).unref();
+  // 만료를 사용자 요청이 아니라 이 타이머들이 먼저 맞게 한다.
+  primeHeavy('준비완료');
+  setInterval(() => primeHeavy('갱신'), PRIME_HEAVY_MS).unref();
+  setInterval(primeLight, PRIME_LIGHT_MS).unref();
 });
