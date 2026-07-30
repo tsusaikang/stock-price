@@ -30,7 +30,17 @@ const MIME = {
   '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
+  '.png': 'image/png',
+  // 매니페스트를 octet-stream으로 주면 안드로이드가 무시하고 홈 화면 앱으로
+  // 설치하지 않는다.
+  '.json': 'application/json; charset=utf-8',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
 };
+
+const contentType = (file) =>
+  file.endsWith('manifest.json')
+    ? 'application/manifest+json; charset=utf-8'
+    : (MIME[extname(file)] ?? 'application/octet-stream');
 
 const json = (res, body, status = 200) => {
   const buf = Buffer.from(JSON.stringify(body));
@@ -200,7 +210,7 @@ const server = http.createServer(async (req, res) => {
 
   try {
     const buf = await readFile(file);
-    res.writeHead(200, { 'Content-Type': MIME[extname(file)] ?? 'application/octet-stream' });
+    res.writeHead(200, { 'Content-Type': contentType(file) });
     res.end(buf);
   } catch {
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }).end('없는 페이지');

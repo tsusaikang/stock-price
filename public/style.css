@@ -46,6 +46,9 @@ main { max-width: 760px; margin: 0 auto; padding: 0 12px 48px; }
 /* ── 상단 ─────────────────────────────────────── */
 .topbar {
   position: sticky; top: 0; z-index: 30;
+  /* color-mix()는 Chrome 111(2023) 이상. 구형에서는 아래 줄이 무시되므로
+     앞줄의 불투명 배경이 남아 헤더가 투명해지지 않는다. */
+  background: var(--bg);
   background: color-mix(in srgb, var(--bg) 88%, transparent);
   backdrop-filter: saturate(180%) blur(12px);
   border-bottom: 1px solid var(--line);
@@ -187,6 +190,7 @@ main { max-width: 760px; margin: 0 auto; padding: 0 12px 48px; }
 .readout {
   position: absolute; top: 8px; left: 12px; font-size: 11.5px;
   color: var(--dim); font-variant-numeric: tabular-nums; pointer-events: none;
+  background: var(--card);
   background: color-mix(in srgb, var(--card) 85%, transparent); padding: 2px 5px; border-radius: 5px;
 }
 
@@ -215,6 +219,13 @@ main { max-width: 760px; margin: 0 auto; padding: 0 12px 48px; }
 .muted { color: var(--faint); font-size: 12.5px; padding: 4px 0; }
 .foot { text-align: center; color: var(--faint); font-size: 11.5px; line-height: 1.7; margin-top: 24px; }
 .skel { padding: 34px 0; text-align: center; color: var(--faint); font-size: 13px; }
+
+/* 스크립트가 죽었을 때 빈 화면 대신 이유를 보여준다 */
+.fatal {
+  margin: 14px 0; padding: 14px 16px; border-radius: var(--radius);
+  background: var(--card); border: 1px solid var(--up);
+  color: var(--up); font-size: 13px; line-height: 1.6; word-break: break-all;
+}
 .err { padding: 20px; text-align: center; color: var(--up); font-size: 13px; }
 
 /* 폰 폭에서도 스파크라인은 살린다 — 한눈에 흐름을 보는 게 이 화면의 목적. */

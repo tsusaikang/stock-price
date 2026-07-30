@@ -5,8 +5,39 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <title>오늘 뭐가 튀었나</title>
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f5f6f8">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0e1013">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="뭐가 튀었나">
+<link rel="manifest" href="/manifest.json">
 <link rel="stylesheet" href="/style.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📈</text></svg>">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
+
+<script>
+// 모듈 스크립트가 통째로 죽어도 빈 화면만 남지 않게, 일반 스크립트로 먼저 등록한다.
+// (홈 화면에서 실행할 때는 개발자 도구를 못 여니 화면에 직접 띄워야 한다.)
+(function () {
+  function show(msg) {
+    var el = document.getElementById('fatal');
+    if (!el) return;
+    el.hidden = false;
+    el.textContent = '화면을 그리지 못했습니다 — ' + msg;
+  }
+  window.addEventListener('error', function (e) {
+    var t = e && e.target;
+    if (t && t !== window && t.tagName) {
+      show((t.src || t.href || t.tagName) + ' 을(를) 불러오지 못했습니다');
+    } else {
+      show((e && e.message) || '스크립트 오류');
+    }
+  }, true);
+  window.addEventListener('unhandledrejection', function (e) {
+    var r = e && e.reason;
+    show((r && r.message) || String(r) || '처리되지 않은 오류');
+  });
+})();
+</script>
 </head>
 <body>
 
@@ -26,6 +57,9 @@
 </header>
 
 <main id="app">
+  <div id="fatal" class="fatal" hidden></div>
+  <noscript><div class="fatal">이 화면은 자바스크립트가 있어야 동작합니다.</div></noscript>
+
   <section id="indices" class="indices"></section>
   <section id="searched" class="block" hidden></section>
   <section id="favs" class="block" hidden></section>
@@ -37,7 +71,7 @@
       <button data-tab="issue" role="tab">이슈</button>
       <button data-tab="cap"   role="tab">시총</button>
     </nav>
-    <div id="list" class="list"></div>
+    <div id="list" class="list"><div class="skel">불러오는 중…</div></div>
   </section>
 
   <p class="foot">

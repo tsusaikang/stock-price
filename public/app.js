@@ -5,6 +5,8 @@ const fmt = (n) => (n ?? 0).toLocaleString('ko-KR');
 const sign = (n) => (n > 0 ? '+' : n < 0 ? '−' : '');
 const cls = (n) => (n > 0 ? 'up' : n < 0 ? 'down' : 'flat');
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+// Array.prototype.at()은 Chrome 92(2021) 이상이라 구형 안드로이드에서 터진다.
+const lastOf = (arr) => arr[arr.length - 1];
 
 const RANGES = { '1개월': 22, '3개월': 65, '1년': 400 };
 
@@ -35,7 +37,7 @@ function sparkline(values) {
   const pts = values
     .map((v, i) => `${((i / (values.length - 1)) * (w - 2) + 1).toFixed(1)},${(h - 3 - ((v - min) / span) * (h - 6)).toFixed(1)}`)
     .join(' ');
-  const dir = values.at(-1) - values[0];
+  const dir = lastOf(values) - values[0];
   return `<svg class="spark ${cls(dir)}" viewBox="0 0 ${w} ${h}"
     preserveAspectRatio="none" aria-hidden="true">
     <polyline points="${pts}" fill="none" stroke="currentColor" stroke-width="1.5"
@@ -63,7 +65,7 @@ function priceChart(rows, id) {
   const area = `${PL},${(PT + priceH).toFixed(1)} ${line} ${(PL + innerW).toFixed(1)},${(PT + priceH).toFixed(1)}`;
 
   const first = closes[0];
-  const last = closes.at(-1);
+  const last = lastOf(closes);
   const dir = cls(last - first);
   const baseY = y(first);
 
@@ -339,14 +341,14 @@ function mountDetail() {
 }
 
 async function loadDetail() {
-  const code = state.open.stack.at(-1);
+  const code = lastOf(state.open.stack);
   state.open.data = null;
   mountDetail();
   try {
     const res = await fetch(`/api/stock?code=${code}`);
     const data = await res.json();
     if (!res.ok) throw new Error(data.error ?? '불러오기 실패');
-    if (state.open?.stack.at(-1) !== code) return; // 그새 다른 종목으로 넘어갔으면 버림
+    if (!state.open || lastOf(state.open.stack) !== code) return; // 그새 다른 종목으로 넘어갔으면 버림
     state.open.data = data;
   } catch (e) {
     state.open.data = null;
@@ -359,7 +361,7 @@ async function loadDetail() {
 }
 
 function openStock(anchor, code = anchor) {
-  if (state.open?.anchor === anchor && state.open.stack.at(-1) === code) {
+  if (state.open?.anchor === anchor && lastOf(state.open.stack) === code) {
     state.open = null; // 같은 걸 또 누르면 접는다
     renderAll();
     return;
