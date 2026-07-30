@@ -12,7 +12,10 @@
 
 <header class="topbar">
   <div class="topbar-inner">
-    <h1>오늘 뭐가 튀었나</h1>
+    <div class="title-wrap">
+      <h1>오늘 뭐가 튀었나</h1>
+      <span id="stamp" class="stamp" aria-live="polite"></span>
+    </div>
     <button id="refresh" class="icon-btn" title="새로고침" aria-label="새로고침">↻</button>
   </div>
   <div class="search-wrap">
@@ -38,7 +41,8 @@
   </section>
 
   <p class="foot">
-    시세 출처 네이버 금융 · 실시간 아님(최대 1분 지연 캐시)<br>
+    시세 출처 네이버 금융 · 실시간 아님(최대 1분 캐시)<br>
+    상단 시각은 <b>시세 시점</b>이고, 아래는 이 화면이 받아온 시각입니다.<br>
     <span id="updated"></span>
   </p>
 </main>

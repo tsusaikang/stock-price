@@ -207,11 +207,52 @@ function renderFavs() {
   mountDetail();
 }
 
+/** 한국 시간 기준으로 쪼갠 날짜 조각 (사용자가 어느 시간대에 있든 장 시간은 KST다) */
+function seoulParts(date) {
+  const parts = new Intl.DateTimeFormat('ko-KR', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    weekday: 'short',
+  }).formatToParts(date);
+  return Object.fromEntries(parts.map((p) => [p.type, p.value]));
+}
+
+/**
+ * 지금 보고 있는 값이 "언제의 시세인지" 표시한다.
+ * 받아온 시각이 아니라 네이버가 준 체결 시각(localTradedAt)을 쓴다 —
+ * 캐시와 SWR 때문에 둘은 벌어질 수 있고, 알고 싶은 건 후자가 아니라 전자다.
+ */
+function renderStamp() {
+  const el = $('#stamp');
+  const idx = state.home?.indices?.find((x) => x.tradedAt);
+  if (!idx) {
+    el.textContent = '';
+    el.classList.remove('live');
+    return;
+  }
+
+  const t = seoulParts(new Date(idx.tradedAt));
+  const now = seoulParts(new Date());
+  const sameDay = t.year === now.year && t.month === now.month && t.day === now.day;
+  const live = idx.marketStatus === 'OPEN';
+  const hhmm = `${t.hour}:${t.minute}`;
+
+  el.classList.toggle('live', live);
+  el.textContent = sameDay
+    ? live
+      ? `${hhmm} 기준`
+      : `${hhmm} 장마감`
+    : `${+t.month}/${+t.day}(${t.weekday}) 종가`;
+  el.title = `시세 시점: ${t.year}.${t.month}.${t.day} ${hhmm} (한국시간)`;
+}
+
 function renderIndices() {
+  renderStamp();
   $('#indices').innerHTML = (state.home?.indices ?? [])
     .map(
       (x) => `<div class="idx">
-        <div class="nm">${esc(x.name)} ${x.marketStatus === 'OPEN' ? '· 장중' : ''}</div>
+        <div class="nm">${esc(x.name)}</div>
         <div class="pv ${cls(x.rate)}">${x.price.toLocaleString('ko-KR', { minimumFractionDigits: 2 })}</div>
         <div class="ch ${cls(x.rate)}">${sign(x.rate)}${fmt(Math.abs(x.diff).toFixed(2))} (${sign(x.rate)}${Math.abs(x.rate).toFixed(2)}%)</div>
       </div>`
@@ -326,7 +367,22 @@ function openStock(anchor, code = anchor) {
 }
 
 // ── 데이터 로드 ───────────────────────────────────────────────────────
-async function loadHome() {
+const STALE_LIMIT_SEC = 90;
+
+/**
+ * 서버는 만료된 값을 즉시 돌려주고 갱신은 뒤에서 한다(SWR). 그래서 첫 요청은
+ * 한 박자 지난 시세를 받을 수 있다. 표시한 시각이 너무 옛것이면 조용히 한 번만
+ * 다시 받는다 — 그 사이 서버의 백그라운드 갱신이 끝나 있다.
+ */
+function freshenIfStale() {
+  const idx = state.home?.indices?.find((x) => x.tradedAt);
+  if (!idx || idx.marketStatus !== 'OPEN') return; // 장 마감 뒤엔 안 바뀐다
+  const ageSec = (Date.now() - new Date(idx.tradedAt).getTime()) / 1000;
+  if (ageSec < STALE_LIMIT_SEC) return;
+  setTimeout(() => loadHome({ retry: true }), 1500);
+}
+
+async function loadHome({ retry = false } = {}) {
   const btn = $('#refresh');
   btn.classList.add('spin');
   try {
@@ -334,7 +390,8 @@ async function loadHome() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error ?? '불러오기 실패');
     state.home = data;
-    $('#updated').textContent = `갱신 ${new Date(data.updatedAt).toLocaleTimeString('ko-KR')}`;
+    // 상단 표시가 "시세 시점"이라면 이쪽은 "받아온 시각". 둘은 다르다.
+    $('#updated').textContent = `화면에 받아온 시각 ${new Date(data.updatedAt).toLocaleTimeString('ko-KR')}`;
   } catch (e) {
     $('#list').innerHTML = `<div class="err">시세를 못 불러왔습니다 · ${esc(e.message)}</div>`;
   } finally {
@@ -342,6 +399,7 @@ async function loadHome() {
   }
   renderIndices();
   renderList();
+  if (!retry) freshenIfStale(); // 재시도는 한 번만
 }
 
 async function loadFavs() {
@@ -413,6 +471,11 @@ document.addEventListener('click', (ev) => {
 $('#refresh').addEventListener('click', () => {
   loadHome();
   loadFavs();
+});
+
+// 탭을 다시 열었을 때 옛 시세를 그대로 보고 있지 않게 한다.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') freshenIfStale();
 });
 
 // 검색
