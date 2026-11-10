@@ -6,3 +6,6 @@ node_modules/
 
 # 이 맥에서만 쓰는 Claude Code 권한 설정 (공유 대상 아님)
 .claude/settings.local.json
+
+# wrangler 로컬 상태(로컬 D1 등)
+.wrangler/

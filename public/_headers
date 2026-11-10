@@ -1,0 +1,9 @@
+# Static Assets 응답 헤더. 이 파일 자체는 서빙되지 않는다.
+
+# 확장자만 보고 application/json으로 나간다. 매니페스트는 전용 타입이 표준이다.
+/manifest.json
+  Content-Type: application/manifest+json; charset=utf-8
+
+# 아이콘은 거의 안 바뀐다
+/icon-*.png
+  Cache-Control: public, max-age=604800

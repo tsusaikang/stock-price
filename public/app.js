@@ -377,14 +377,20 @@ const STALE_LIMIT_SEC = 90;
 /**
  * 서버는 만료된 값을 즉시 돌려주고 갱신은 뒤에서 한다(SWR). 그래서 첫 요청은
  * 한 박자 지난 시세를 받을 수 있다. 표시한 시각이 너무 옛것이면 조용히 한 번만
- * 다시 받는다 — 그 사이 서버의 백그라운드 갱신이 끝나 있다.
+ * 다시 받는다 — 그 사이(2.5초) 서버의 백그라운드 갱신이 끝나 있다.
  */
 function freshenIfStale() {
+  // 서버가 "묵은 걸 먼저 줬고 지금 뒤에서 갱신 중"(stale)이라고 알려주면 장 상태와 무관하게
+  // 한 번 더 받는다. 장 마감 뒤에 장중 화면이 남아 있던 경우도 여기서 풀린다.
+  if (state.home?.stale) {
+    setTimeout(() => loadHome({ retry: true }), 2500);
+    return;
+  }
   const idx = state.home?.indices?.find((x) => x.tradedAt);
   if (!idx || idx.marketStatus !== 'OPEN') return; // 장 마감 뒤엔 안 바뀐다
   const ageSec = (Date.now() - new Date(idx.tradedAt).getTime()) / 1000;
   if (ageSec < STALE_LIMIT_SEC) return;
-  setTimeout(() => loadHome({ retry: true }), 1500);
+  setTimeout(() => loadHome({ retry: true }), 2500);
 }
 
 async function loadHome({ retry = false } = {}) {

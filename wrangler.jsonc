@@ -1,0 +1,47 @@
+// Cloudflare Workers 배포 설정.
+// GitHub(tsusaikang/stock-price) main에 푸시하면 Cloudflare Workers Builds가 감지해
+// `npx wrangler deploy`를 돌린다. 계정은 tsusaikang@gmail.com — 다른 계정에 만들지 않는다.
+// (이 맥의 wrangler는 다른 계정에 로그인돼 있으니 여기서 직접 deploy 하지 말 것.)
+{
+  // 대시보드의 Worker 이름과 반드시 같아야 한다(다르면 Workers Builds가 실패).
+  "name": "stock-price",
+  "main": "src/worker.js",
+  // 고정 설치한 wrangler(package.json)의 런타임이 지원하는 최신 날짜. 2026-08-04 이후라
+  // nodejs_compat은 기본으로 켜져 있어 따로 적지 않는다.
+  "compatibility_date": "2026-11-09",
+
+  // public/은 Worker를 거치지 않고 바로 나간다(무료·무제한). 파일에 없는 경로(/api/*, /healthz)만
+  // Worker가 받는다. not_found_handling·run_worker_first는 쓰지 않는다 — 쓰면 주소창으로
+  // /api/... 를 열었을 때 HTML이 나가는 등 동작이 달라진다.
+  "assets": {
+    "directory": "./public"
+  },
+
+  // 화면 스냅숏과 종가 저장소. 스키마는 src/store.js가 스스로 만든다(마이그레이션 명령 불필요).
+  // 2026-11-10 대시보드에서 생성, 위치 힌트 Asia Pacific (running_in_region: APAC).
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "stock-price",
+      "database_id": "1c8a669e-ae5c-44b1-948e-d93793d83d7e"
+    }
+  ],
+
+  // 1분마다, UTC 23:00~08:59 = 한국 08:00~17:59. 할 일은 src/worker.js scheduled()가 시각을 보고 고른다:
+  //   장중(평일 08:30~15:45) → 첫 화면 갱신 (열었을 때 이미 1~2분 안쪽 값이 있게)
+  //   그 밖                  → 후보군 재구축 한 단계 (마감 뒤 약 12번이면 끝, 나머지는 바로 끝남)
+  // 요일 필드는 쓰지 않는다(Cloudflare cron의 요일 번호가 일반 cron과 다르다) — 주말은 코드가 거른다.
+  // 무료 플랜은 계정 전체에 cron 5개뿐이다. 이 Worker는 1개만 쓴다.
+  "triggers": {
+    "crons": ["* 23,0-8 * * *"]
+  },
+
+  // 공개 주소. dwnc.me가 같은 계정의 zone이라 배포 때 DNS 레코드·인증서가 자동으로 붙는다.
+  "routes": [{ "pattern": "stock.dwnc.me", "custom_domain": true }],
+
+  // 계정 하위 주소(stock-price.dwnc.workers.dev)와 미리보기 주소는 끈다 — 공개 주소는 하나.
+  "workers_dev": false,
+  "preview_urls": false,
+
+  "observability": { "enabled": true }
+}

@@ -3,9 +3,17 @@
   "configurations": [
     {
       "name": "stock-price",
-      "runtimeExecutable": "node",
-      "runtimeArgs": ["server.js"],
-      "port": 3000
+      "runtimeExecutable": "npx",
+      "runtimeArgs": [
+        "wrangler",
+        "dev",
+        "--ip",
+        "127.0.0.1",
+        "--port",
+        "8787",
+        "--test-scheduled"
+      ],
+      "port": 8787
     }
   ]
 }
