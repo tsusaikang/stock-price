@@ -314,50 +314,6 @@ const routes = {
     return json({ ok: true, colo: req.cf?.colo ?? null });
   },
 
-  // ── 임시: CPU 구간 측정용. 측정이 끝나면 지운다. ─────────────────────
-  async '/api/_bench'(req, env) {
-    const c = new URL(req.url).searchParams.get('case');
-    const b = new Budget(10);
-    const db = env.DB;
-    switch (c) {
-      case 'noop':
-        return json({ c });
-      case 'd1':
-        await db.prepare('SELECT 1').first();
-        return json({ c });
-      case 'schema':
-        await db.batch(['SELECT 1', 'SELECT 1', 'SELECT 1', 'SELECT 1'].map((s) => db.prepare(s)));
-        await getBlob(db, 'schema_version');
-        return json({ c });
-      case 'pack-raw': {
-        const row = await db.prepare('SELECT data FROM pack WHERE key = ?').bind(PACK_KEY).first();
-        return json({ c, type: Object.prototype.toString.call(row.data), len: row.data?.length ?? row.data?.byteLength });
-      }
-      case 'pack':
-        return json({ c, n: unpack(await getPack(db, PACK_KEY)).length });
-      case 'fetch1':
-        await fetchBasic('005930', b);
-        return json({ c });
-      case 'fetch4':
-        await Promise.all([
-          fetchBasic('005930', b),
-          fetchIntegration('005930', b),
-          fetchDaily('005930', 400, b),
-          fetchQuotes(['005930', '000660', '034020', '035720', '005380', '105560', '000270', '068270', '207940', '005490', '035420', '051910'], b),
-        ]);
-        return json({ c });
-      case 'corr': {
-        const [ohlcv, pack] = await Promise.all([fetchDaily('005930', 400, b), getPack(db, PACK_KEY)]);
-        return json({ c, n: findRelated('005930', ohlcv, unpack(pack)).together.length });
-      }
-      case 'big-json': {
-        const o = await fetchDaily('005930', 400, b);
-        return json({ c, ohlcv: o });
-      }
-      default:
-        return json({ c: 'unknown' }, { status: 400 });
-    }
-  },
 };
 
 export default {
