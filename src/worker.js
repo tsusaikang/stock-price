@@ -15,12 +15,13 @@ import {
   daysBefore,
   sessionDayGuess,
   phaseMismatch,
+  lastCloseMoment,
   ymdOfIso,
   json,
 } from './util.js';
 import { fetchBasic, fetchIntegration, fetchDaily, fetchQuotes, search, fetchIndex, fetchRanking } from './naver.js';
 import { dbOrNull, getBlob, getUniverse, getSeries, putSeries, acquireLease, releaseLease, countGen, getPack } from './store.js';
-import { HOME_KEY, refreshPrices, backfillSaved, sparkOf, RETRY_MS } from './home.js';
+import { HOME_KEY, refreshPrices, backfillSaved, sparkOf, RETRY_MS, groupAt } from './home.js';
 import { findRelated, unpack } from './related.js';
 import { getState, needsWork, step, toSeries, STEP_FETCHES, PACK_KEY } from './universe.js';
 
@@ -29,8 +30,8 @@ const LOCK_TTL = 30_000;
 // 장중엔 cron이 2분마다 가격을 데우므로 사용자 요청이 갱신을 거들 일은 cron이 멈췄을 때뿐이다.
 const MAX_AGE_SESSION = 3 * 60_000;
 const MAX_AGE_OFF = 15 * 60_000;
-const CRON_PRICE_EVERY = 100_000; // 장중 가격 갱신 간격(약 2분). 사이 분에는 스파크라인을 보충한다.
-const PRICE_FETCHES = 9; // 지수 1 + 랭킹 8
+const CRON_PRICE_EVERY = 100_000; // 장중 묶음별 가격 갱신 간격(약 2분). 묶음 A·B를 1분씩 번갈아.
+const PRICE_FETCHES = 9; // 지수 1 + 랭킹 8 (두 묶음 전부)
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -43,11 +44,11 @@ class HttpError extends Error {
 const homeResponse = (snap, extra = {}) =>
   json({ ...snap, fetchedAt: snap.fetchedAt, updatedAt: new Date().toISOString(), ...extra });
 
-/** 잠금을 잡고 첫 화면 가격 갱신. 다른 곳이 갱신 중이면 아무것도 안 한다. */
-async function refreshLocked(db, budget, prev) {
+/** 잠금을 잡고 첫 화면 가격 갱신. 다른 곳이 갱신 중이면 아무것도 안 한다(null). */
+async function refreshLocked(db, budget, prev, groups) {
   if (!(await acquireLease(db, LOCK, LOCK_TTL))) return null;
   try {
-    return (await refreshPrices(db, budget, prev)).snap;
+    return await refreshPrices(db, budget, prev, Date.now(), { groups });
   } finally {
     await releaseLease(db, LOCK).catch(() => {});
   }
@@ -78,22 +79,30 @@ const routes = {
    *   화면(app.js)은 stale이면 2.5초 뒤 한 번 더 받는다.
    */
   async '/api/home'(req, env, ctx) {
-    const db = await dbOrNull(env);
+    let db = dbOrNull(env);
+    let saved = null;
+    if (db) {
+      try {
+        saved = await getBlob(db, HOME_KEY);
+      } catch (err) {
+        console.error('D1 unavailable:', err.message);
+        db = null;
+      }
+    }
     if (!db) {
       // D1이 죽었으면 저장 없이 가격만 (스파크라인 없음)
-      const { snap } = await refreshPrices(null, new Budget());
+      const { snap } = await refreshPrices(null, new Budget(PRICE_FETCHES), null);
       return homeResponse(snap, { d1: false });
     }
 
     const now = Date.now();
-    const saved = await getBlob(db, HOME_KEY);
     const age = saved ? now - saved.updated : Infinity;
 
     if (!saved || (age > 60_000 && phaseMismatch(saved.value, now))) {
       if (await acquireLease(db, LOCK, LOCK_TTL)) {
         try {
           // 가격만 기다린다. 비어 있는 스파크라인은 cron이 다음 분부터 채운다.
-          const { snap } = await refreshPrices(db, new Budget(PRICE_FETCHES), saved?.value, now);
+          const { snap } = await refreshPrices(db, new Budget(PRICE_FETCHES), saved?.value, now, { groups: ['A', 'B'] });
           return homeResponse(snap);
         } catch (err) {
           if (!saved) throw err;
@@ -108,8 +117,9 @@ const routes = {
 
     const maxAge = inSession(now) ? MAX_AGE_SESSION : MAX_AGE_OFF;
     if (age > maxAge) {
+      // 뒤에서는 지수+급등+급락(묶음 A, 요청 5)만 — 이슈·시총은 cron이 다음 분에.
       ctx.waitUntil(
-        refreshLocked(db, new Budget(PRICE_FETCHES), saved.value).catch((err) => console.error('home', err.message))
+        refreshLocked(db, new Budget(5), saved.value, ['A']).catch((err) => console.error('home', err.message))
       );
       return homeResponse(saved.value, { stale: true });
     }
@@ -126,7 +136,7 @@ const routes = {
     if (!codes.length) return json([]);
 
     const budget = new Budget();
-    const db = await dbOrNull(env);
+    const db = dbOrNull(env);
     const [quotes, home] = await Promise.all([
       fetchQuotes(codes, budget),
       db ? getBlob(db, HOME_KEY).catch(() => null) : null,
@@ -136,7 +146,7 @@ const routes = {
 
     let stored = new Map();
     if (db) {
-      stored = await getSeries(db, quotes.map((q) => q.code));
+      stored = await getSeries(db, quotes.map((q) => q.code)).catch(() => new Map());
       const need = lastClosedDay();
       const now = Date.now();
       const todo = quotes
@@ -172,9 +182,8 @@ const routes = {
     if (!/^[0-9A-Z]{6}$/.test(code)) throw new HttpError(400, '종목코드가 올바르지 않습니다');
 
     const budget = new Budget();
-    const db = await dbOrNull(env);
-    const [basic, integ, ohlcv, universe] = await Promise.all([
-      fetchBasic(code, budget),
+    const db = dbOrNull(env);
+    const [integ, ohlcv, universe] = await Promise.all([
       fetchIntegration(code, budget).catch(() => ({ totals: [], industryPeers: [] })),
       fetchDaily(code, 400, budget),
       db ? loadUniverse(db) : [],
@@ -182,15 +191,17 @@ const routes = {
 
     const rel = findRelated(code, ohlcv, universe);
 
-    // 칩에 붙일 지금 등락률: 최대 12종목을 외부 요청 1개로
-    const chipCodes = [...rel.together, ...rel.opposite].map((s) => s.code);
-    if (chipCodes.length) {
-      const live = new Map((await fetchQuotes(chipCodes, budget).catch(() => [])).map((q) => [q.code, q]));
-      for (const s of [...rel.together, ...rel.opposite]) {
-        const q = live.get(s.code);
-        if (q) Object.assign(s, { rate: q.rate, price: q.price });
-      }
+    // 이 종목 시세 + 칩 12개의 지금 등락률을 외부 요청 1개로. (예전엔 이 종목 시세를 따로 받았는데,
+    // 무료 플랜 CPU가 요청 수에 비례해서 하나로 합쳤다.) 일괄 조회가 실패하면 그때만 따로 받는다.
+    const chips = [...rel.together, ...rel.opposite];
+    const live = new Map(
+      (await fetchQuotes([code, ...chips.map((s) => s.code)], budget).catch(() => [])).map((q) => [q.code, q])
+    );
+    for (const s of chips) {
+      const q = live.get(s.code);
+      if (q) Object.assign(s, { rate: q.rate, price: q.price });
     }
+    const basic = live.get(code) ?? (await fetchBasic(code, budget));
 
     return json({
       ...basic,
@@ -213,7 +224,7 @@ const routes = {
 
   /** 후보군 진행 상황. 덜 됐으면 한 단계 진행한다(다 됐으면 네이버를 부르지 않는다). */
   async '/api/universe'(req, env) {
-    const db = await dbOrNull(env);
+    const db = dbOrNull(env);
     if (!db) throw new HttpError(503, 'D1을 쓸 수 없습니다');
     const before = await getState(db);
     const result = needsWork(before) ? await step(db, new Budget(STEP_FETCHES)) : { did: 'none' };
@@ -274,14 +285,14 @@ const routes = {
     }
 
     let d1 = { ok: false };
-    const db = await dbOrNull(env);
+    const db = dbOrNull(env);
     if (db) {
       const t0 = Date.now();
-      await db.prepare('SELECT 1').first();
+      const alive = await db.prepare('SELECT 1').first().then(() => true, (err) => (d1.error = err.message, false));
       const ms = Date.now() - t0;
-      const [home, uni] = await Promise.all([getBlob(db, HOME_KEY), getState(db)]);
+      const [home, uni] = alive ? await Promise.all([getBlob(db, HOME_KEY), getState(db)]) : [null, null];
       d1 = {
-        ok: true,
+        ok: alive,
         roundTripMs: ms, // 이 데이터센터에서 D1까지. 60ms를 크게 넘으면 D1 위치를 다시 볼 것
         homeAgeSec: home ? Math.round((Date.now() - home.updated) / 1000) : null,
         homePartial: home?.value?.partial ?? null,
@@ -367,38 +378,54 @@ export default {
 
   /**
    * cron (한국 08:00~17:59, 1분마다). 한 번에 **한 덩어리**만 한다 — 무료 플랜 CPU 10ms가
-   * 외부 요청 개수에 거의 비례해서(1개 ≈ 1ms), 두 가지를 겹치면 넘친다.
+   * 외부 요청 개수에 거의 비례해서(1개 ≈ 1ms) 여러 가지를 겹치면 넘친다.
    *
-   *   장중(평일 08:30~15:45): 가격이 100초 넘게 묵었으면 가격 갱신(요청 9), 아니면 스파크라인 보충(≤8)
-   *                           → 가격은 약 2분마다, 사이 분에 스파크라인
-   *   그 밖:                  장 상태가 바뀌었으면 가격 한 번 → 아니면 후보군 재구축 한 단계(≤10)
-   *                           → 아니면 스파크라인 보충
+   *   장중(평일 08:30~15:45): 가격 묶음 A(지수+급등+급락, 요청 5)와 B(이슈+시총, 요청 4)를
+   *     1분씩 번갈아 갱신 → 묶음마다 약 2분 간격. B 차례엔 남는 4개로 스파크라인 보충.
+   *   그 밖: 장 마감 뒤 아직 한 번도 안 받은 묶음 → 후보군 재구축 한 단계(≤10) → 스파크라인 보충
    * cron은 어느 데이터센터에서 돌지 모르니 느릴 수 있다. 시한은 넉넉히(5분) 둔다.
    */
   async scheduled(controller, env) {
-    const db = await dbOrNull(env);
+    const db = dbOrNull(env);
     if (!db) return;
     const now = Date.now();
     const log = (o) => console.log(JSON.stringify({ cron: controller.cron, ...o }));
     const budgetOf = (n) => new Budget(n, { deadlineMs: 5 * 60_000 });
 
     const saved = await getBlob(db, HOME_KEY);
-    const age = saved ? now - saved.updated : Infinity;
-    const session = inSession(now);
+    const snap = saved?.value ?? null;
 
-    const pricesDue = session ? age > CRON_PRICE_EVERY : age > 60_000 && phaseMismatch(saved?.value, now);
-    if (pricesDue) {
-      const r = await refreshLocked(db, budgetOf(PRICE_FETCHES), saved?.value).catch((err) => ({ error: err.message }));
-      return log({ did: 'prices', ...(r?.error ? r : { skipped: r === null }) });
+    // 갱신할 가격 묶음 고르기 (가장 오래된 쪽)
+    let due = null;
+    if (!snap) due = ['A', 'B'];
+    else if (inSession(now)) {
+      const g = groupAt(snap, 'A') <= groupAt(snap, 'B') ? 'A' : 'B';
+      if (now - groupAt(snap, g) > CRON_PRICE_EVERY) due = [g];
+    } else {
+      // 장 밖: 마지막 마감(15:45) 이후 아직 안 받은 묶음이 있으면 하나씩 — 마감 확정 가격으로 맞춘다.
+      const close = lastCloseMoment(now);
+      const g = ['A', 'B'].find((x) => groupAt(snap, x) < close);
+      if (g) due = [g];
     }
 
-    if (!session) {
+    if (due) {
+      const r = await refreshLocked(db, budgetOf(PRICE_FETCHES), snap, due).catch((err) => ({ error: err.message }));
+      log({ did: 'prices', groups: due.join(''), ...(r?.error ? { error: r.error } : r === null ? { skipped: 'locked' } : {}) });
+      // B 차례(요청 4)면 남는 몫으로 스파크라인 보충
+      if (r?.snap && due.length === 1 && due[0] === 'B') {
+        const b = await backfillSaved(db, budgetOf(4), r.snap, now).catch((err) => ({ error: err.message }));
+        if (b) log({ did: 'backfill', after: 'B', ...(b.error ? b : {}) });
+      }
+      return;
+    }
+
+    if (!inSession(now)) {
       const st = await getState(db);
       if (needsWork(st, now)) return log({ did: 'universe', ...(await step(db, budgetOf(STEP_FETCHES), { now })) });
     }
 
-    if (saved) {
-      const r = await backfillSaved(db, budgetOf(8), saved.value, now).catch((err) => ({ error: err.message }));
+    if (snap) {
+      const r = await backfillSaved(db, budgetOf(8), snap, now).catch((err) => ({ error: err.message }));
       if (r) log({ did: 'backfill', ...(r.error ? r : {}) });
     }
   },

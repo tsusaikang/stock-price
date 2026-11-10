@@ -68,6 +68,16 @@ export function phaseMismatch(snapshot, ms = Date.now()) {
   return status === 'OPEN' && !inSession(ms);
 }
 
+/** 가장 최근의 평일 15:45(KST) 시각(ms). 장 마감 뒤 확정 가격을 한 번 더 받았는지 볼 때 쓴다. */
+export function lastCloseMoment(ms = Date.now()) {
+  for (let back = 0; back < 8; back++) {
+    const p = kst(ms - back * DAY);
+    const close = Date.UTC(p.y, p.m - 1, p.d, 15, 45) - KST;
+    if (isWeekday(p.dow) && close <= ms) return close;
+  }
+  return 0;
+}
+
 /** YYYYMMDD 문자열에서 n일 전 (달력 기준) */
 export function daysBefore(ymd, n) {
   const t = Date.UTC(+ymd.slice(0, 4), +ymd.slice(4, 6) - 1, +ymd.slice(6, 8)) - n * DAY;

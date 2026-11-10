@@ -61,50 +61,71 @@ const unique = (lists) => {
   return [...seen.values()];
 };
 
+// 가격 갱신 묶음. 무료 플랜 CPU가 외부 요청 수에 비례해서(1개 ≈ 1ms) 한 번에 다 받으면(9개)
+// 10ms 언저리라, cron은 묶음 하나씩 번갈아 받는다. 지수는 화면 상단 시각의 근거라 A에 둔다.
+export const GROUPS = {
+  A: { indices: true, lists: ['up', 'down'] }, // 지수 1 + 랭킹 4 = 요청 5
+  B: { indices: false, lists: ['issue', 'cap'] }, // 랭킹 4 = 요청 4
+};
+
+/** 묶음별 마지막 갱신 시각. 묶음 기록이 없는 옛 스냅숏은 저장 시각으로 친다. */
+export const groupAt = (snap, g) => snap?.at?.[g] ?? snap?.fetchedAt ?? 0;
+
 /**
- * 1단계: 가격. 칸(지수·목록)마다 따로 받고, 실패한 칸은 이전 화면 값을 그대로 쓴다.
- * 반쪽짜리(예: 코스피만 있는 급등 목록)를 저장해서 멀쩡한 화면을 덮어쓰지 않으려는 것.
+ * 1단계: 가격. groups에 든 묶음만 새로 받고 나머지 칸은 이전 화면 값을 그대로 둔다.
+ * 받다가 실패한 칸도 이전 값을 쓴다 — 반쪽짜리(예: 코스피만 있는 급등 목록)로 멀쩡한 화면을
+ * 덮어쓰지 않으려는 것. 이전 화면이 없으면 묶음과 상관없이 전부 받는다.
  */
-export async function refreshPrices(db, budget, prev, now = Date.now()) {
+export async function refreshPrices(db, budget, prev, now = Date.now(), { groups = ['A', 'B'] } = {}) {
+  if (!prev) groups = ['A', 'B'];
+  const wantIndices = groups.some((g) => GROUPS[g].indices);
+  const wantLists = new Set(groups.flatMap((g) => GROUPS[g].lists));
+  const plan = LISTS.filter(([name]) => wantLists.has(name));
+
   const [idx, ...ranked] = await Promise.allSettled([
-    fetchIndices(budget),
-    ...LISTS.map(([, sort, size]) => fetchRanking(sort, size, budget, { strict: true })),
+    wantIndices ? fetchIndices(budget) : Promise.resolve(null),
+    ...plan.map(([, sort, size]) => fetchRanking(sort, size, budget, { strict: true })),
   ]);
 
   const failed = [];
-  const got = idx.status === 'fulfilled' ? idx.value : [];
+  const got = idx.status === 'fulfilled' && idx.value ? idx.value : [];
   const indices = ['KOSPI', 'KOSDAQ']
     .map((code) => {
       const fresh = got.find((i) => i.code === code);
       if (fresh) return fresh;
-      failed.push(code);
+      if (wantIndices) failed.push(code);
       return prev?.indices?.find((i) => i.code === code) ?? null;
     })
     .filter(Boolean);
 
   const lists = {};
-  LISTS.forEach(([name], i) => {
-    const r = ranked[i];
-    if (r.status === 'fulfilled' && r.value.length) lists[name] = r.value.slice(0, LIST_N);
+  for (const [name] of LISTS) {
+    const i = plan.findIndex(([n]) => n === name);
+    const r = i >= 0 ? ranked[i] : null;
+    if (r?.status === 'fulfilled' && r.value.length) lists[name] = r.value.slice(0, LIST_N);
     else {
-      failed.push(name);
+      if (r) failed.push(name);
       lists[name] = prev?.lists?.[name] ?? [];
     }
-  });
+  }
 
   const filled = Object.values(lists).filter((l) => l.length).length;
   if (!indices.length || filled < 3) {
-    throw new Error(`첫 화면을 만들 수 없음 (실패: ${failed.join(', ')})`);
+    throw new Error(`첫 화면을 만들 수 없음 (실패: ${failed.join(', ') || '이전 화면 없음'})`);
   }
 
   const sessionDay = ymdOfIso(indices[0]?.tradedAt) ?? sessionDayGuess(now);
   const prevSparks = new Map(prev ? unique(prev.lists).map((s) => [s.code, s.spark ?? []]) : []);
-  const stored = db ? await getSeries(db, unique(lists).map((s) => s.code)) : new Map();
+  const stored = db ? await getSeries(db, unique(lists).map((s) => s.code)).catch(() => new Map()) : new Map();
+
+  const at = { A: groupAt(prev, 'A'), B: groupAt(prev, 'B') };
+  for (const g of groups) at[g] = now;
 
   const snap = {
     indices,
     lists: attachSparks(lists, stored, sessionDay, prevSparks),
     fetchedAt: now,
+    at,
     ...(failed.length ? { partial: failed } : {}),
   };
   if (db) await putBlob(db, HOME_KEY, snap);
@@ -147,7 +168,7 @@ export function needsBackfill(snap, stored, now = Date.now()) {
   });
 }
 
-/** 저장된 화면을 기준으로 스파크라인만 보충 (cron용, 가격은 다시 받지 않는다) */
+/** 저장된 화면을 기준으로 스파크라인만 보충 (cron용, 가격은 다시 받지 않는다). 할 일 없으면 null. */
 export async function backfillSaved(db, budget, snap, now = Date.now()) {
   const stored = await getSeries(db, unique(snap.lists).map((s) => s.code));
   if (!needsBackfill(snap, stored, now)) return null;

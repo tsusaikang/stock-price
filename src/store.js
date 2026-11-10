@@ -38,44 +38,55 @@ const MIGRATIONS = [
   ],
 ];
 
-let ready = false; // 인스턴스당 한 번. 실패하면 다음 요청에서 다시 시도한다.
+let migrated = false; // 인스턴스당 한 번만 시도
 
-export async function ensureSchema(db) {
-  if (ready) return;
+async function migrate(db) {
   await db.batch(MIGRATIONS[0].map((s) => db.prepare(s)));
-  const have = Number((await getBlob(db, 'schema_version'))?.value ?? 1);
+  const row = await db.prepare("SELECT value FROM blob WHERE key = 'schema_version'").first();
+  const have = Number(row ? JSON.parse(row.value) : 1);
   for (let v = have; v < MIGRATIONS.length; v++) {
     await db.batch(MIGRATIONS[v].map((s) => db.prepare(s)));
-    await putBlob(db, 'schema_version', v + 1);
+    await db
+      .prepare(`INSERT INTO blob (key, value, updated) VALUES ('schema_version', ?1, ?2)
+                ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated = excluded.updated`)
+      .bind(JSON.stringify(v + 1), Date.now())
+      .run();
   }
-  ready = true;
 }
 
-/** D1이 살아 있으면 db, 아니면 null. D1이 죽어도 검색·차트는 동작해야 한다. */
-export async function dbOrNull(env) {
+/**
+ * 쿼리를 그냥 실행하고, "테이블/컬럼 없음" 오류가 날 때만 스키마를 만든 뒤 한 번 다시 한다.
+ * 매 인스턴스 시작마다 CREATE … IF NOT EXISTS를 돌리면 요청마다 CPU 2~6ms가 들었다(실측) —
+ * 이 앱은 요청이 드물어서 거의 매번 새 인스턴스라 그 비용을 매번 냈다.
+ */
+async function q(db, fn) {
   try {
-    await ensureSchema(env.DB);
-    return env.DB;
+    return await fn();
   } catch (err) {
-    console.error('D1 unavailable:', err.message);
-    return null;
+    if (migrated || !/no such (table|column)/i.test(err.message)) throw err;
+    migrated = true;
+    await migrate(db);
+    return fn();
   }
 }
+
+/** D1 바인딩. 실제로 살아 있는지는 쿼리가 실패할 때 안다 — 각 경로가 실패를 따로 받는다. */
+export const dbOrNull = (env) => env.DB ?? null;
 
 // ── blob: 화면 스냅숏, 후보군 진행 상태처럼 통째로 읽고 쓰는 값 ──────────
 export async function getBlob(db, key) {
-  const row = await db.prepare('SELECT value, updated FROM blob WHERE key = ?').bind(key).first();
+  const row = await q(db, () => db.prepare('SELECT value, updated FROM blob WHERE key = ?').bind(key).first());
   return row ? { value: JSON.parse(row.value), updated: row.updated } : null;
 }
 
 export function putBlob(db, key, value) {
-  return db
+  return q(db, () => db
     .prepare(
       `INSERT INTO blob (key, value, updated) VALUES (?1, ?2, ?3)
        ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated = excluded.updated`
     )
     .bind(key, JSON.stringify(value), Date.now())
-    .run();
+    .run());
 }
 
 /**
@@ -85,18 +96,18 @@ export function putBlob(db, key, value) {
  */
 export async function acquireLease(db, key, ttlMs) {
   const now = Date.now();
-  const r = await db
+  const r = await q(db, () => db
     .prepare(
       `INSERT INTO blob (key, value, updated) VALUES (?1, '0', ?2)
        ON CONFLICT (key) DO UPDATE SET updated = excluded.updated WHERE blob.updated < ?3`
     )
     .bind(key, now, now - ttlMs)
-    .run();
+    .run());
   return (r.meta?.changes ?? 0) > 0;
 }
 
 export function releaseLease(db, key) {
-  return db.prepare('UPDATE blob SET updated = 0 WHERE key = ?').bind(key).run();
+  return q(db, () => db.prepare('UPDATE blob SET updated = 0 WHERE key = ?').bind(key).run());
 }
 
 // ── series: 종목별 최근 종가 ─────────────────────────────────────────
@@ -107,13 +118,13 @@ export async function getSeries(db, codes) {
   const out = new Map();
   for (let i = 0; i < codes.length; i += 90) {
     const part = codes.slice(i, i + 90);
-    const { results } = await db
+    const { results } = await q(db, () => db
       .prepare(
         `SELECT code, name, market, last, closes, ugen, updated FROM series
          WHERE code IN (${part.map(() => '?').join(',')})`
       )
       .bind(...part)
-      .all();
+      .all());
     for (const r of results) out.set(r.code, parseRow(r));
   }
   return out;
@@ -134,46 +145,51 @@ export async function putSeries(db, rows) {
        name = excluded.name, market = excluded.market, last = excluded.last, closes = excluded.closes,
        ugen = COALESCE(excluded.ugen, series.ugen), updated = excluded.updated`
   );
-  await db.batch(
-    ok.map((r) => stmt.bind(r.code, r.name ?? null, r.market ?? null, r.last, JSON.stringify(r.closes), r.ugen ?? null, now))
+  await q(db, () =>
+    db.batch(
+      ok.map((r) => stmt.bind(r.code, r.name ?? null, r.market ?? null, r.last, JSON.stringify(r.closes), r.ugen ?? null, now))
+    )
   );
 }
 
 /** 상관계수 후보군: 최근 세대에 받은 종목들 */
 export async function getUniverse(db, minGen) {
-  const { results } = await db
-    .prepare('SELECT code, name, market, last, closes FROM series WHERE ugen >= ?')
-    .bind(minGen)
-    .all();
+  const { results } = await q(db, () =>
+    db.prepare('SELECT code, name, market, last, closes FROM series WHERE ugen >= ?').bind(minGen).all()
+  );
   return results.map(parseRow);
 }
 
 /** 이번 세대로 실제 저장된 종목 수 (진행률 표시용) */
 export async function countGen(db, gen) {
-  const r = await db.prepare('SELECT COUNT(*) AS n FROM series WHERE ugen = ?').bind(gen).first();
+  const r = await q(db, () => db.prepare('SELECT COUNT(*) AS n FROM series WHERE ugen = ?').bind(gen).first());
   return r?.n ?? 0;
 }
 
 /** 오래 안 쓰인 종목 정리. 급등락 상위는 매일 바뀌어서 그냥 두면 계속 쌓인다. */
 export function pruneSeries(db, olderThanMs) {
-  return db.prepare('DELETE FROM series WHERE updated < ?').bind(Date.now() - olderThanMs).run();
+  return q(db, () => db.prepare('DELETE FROM series WHERE updated < ?').bind(Date.now() - olderThanMs).run());
 }
 
 // ── pack: 미리 포장한 후보군 ─────────────────────────────────────────
+// 바이너리를 base64 문자열로 담는다. BLOB으로 두면 D1이 숫자 10만 개짜리 JS 배열로 돌려줘서
+// 읽는 데만 CPU 4~8ms가 들었다(실측). 문자열은 그대로 넘어오고 디코딩은 네이티브라 1ms 안쪽.
 export async function getPack(db, key) {
-  const row = await db.prepare('SELECT meta, data, updated FROM pack WHERE key = ?').bind(key).first();
+  const row = await q(db, () => db.prepare('SELECT meta, data, updated FROM pack WHERE key = ?').bind(key).first());
   if (!row) return null;
-  // D1은 BLOB을 ArrayBuffer(또는 숫자 배열)로 돌려준다
-  const buf = row.data instanceof ArrayBuffer ? row.data : new Uint8Array(row.data).buffer;
-  return { meta: JSON.parse(row.meta), data: new Float32Array(buf), updated: row.updated };
+  const bytes = typeof row.data === 'string' ? Uint8Array.fromBase64(row.data) : new Uint8Array(row.data);
+  return { meta: JSON.parse(row.meta), data: new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4), updated: row.updated };
 }
 
 export function putPack(db, key, meta, data) {
-  return db
-    .prepare(
-      `INSERT INTO pack (key, meta, data, updated) VALUES (?1, ?2, ?3, ?4)
-       ON CONFLICT (key) DO UPDATE SET meta = excluded.meta, data = excluded.data, updated = excluded.updated`
-    )
-    .bind(key, JSON.stringify(meta), data.buffer, Date.now())
-    .run();
+  const b64 = new Uint8Array(data.buffer, data.byteOffset, data.byteLength).toBase64();
+  return q(db, () =>
+    db
+      .prepare(
+        `INSERT INTO pack (key, meta, data, updated) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (key) DO UPDATE SET meta = excluded.meta, data = excluded.data, updated = excluded.updated`
+      )
+      .bind(key, JSON.stringify(meta), b64, Date.now())
+      .run()
+  );
 }
