@@ -76,7 +76,31 @@ export function normStock(s) {
 
 // ── 엔드포인트 ────────────────────────────────────────────────────────
 
-/** 지수 (KOSPI / KOSDAQ) */
+/**
+ * 코스피·코스닥을 외부 요청 1개로. 일괄 조회 엔드포인트도 지수에 대해서는 실제 시세 시각을
+ * localTradedAt으로 준다(종목일 때는 요청 시각이라 다르다). 기존 /api/index/…/basic과 값이 같다.
+ */
+export async function fetchIndices(budget) {
+  const j = await getJSON(
+    'https://polling.finance.naver.com/api/realtime/domestic/index/KOSPI,KOSDAQ',
+    H_MOBILE,
+    budget
+  );
+  return (j.datas ?? []).map((x) => {
+    const rate = num(x.fluctuationsRatioRaw ?? x.fluctuationsRatio);
+    return {
+      code: x.itemCode,
+      name: x.stockName,
+      price: num(x.closePriceRaw ?? x.closePrice),
+      diff: signed(num(x.compareToPreviousClosePriceRaw ?? x.compareToPreviousClosePrice), rate),
+      rate,
+      marketStatus: x.marketStatus,
+      tradedAt: x.localTradedAt,
+    };
+  });
+}
+
+/** 지수 하나 (진단용) */
 export async function fetchIndex(code, budget) {
   const j = await getJSON(`https://m.stock.naver.com/api/index/${code}/basic`, H_MOBILE, budget);
   const rate = num(j.fluctuationsRatio);
@@ -113,10 +137,10 @@ async function fetchRankPage(sort, market, page, size, budget) {
  * strict: 페이지가 하나라도 실패하면 예외. 반쪽짜리 목록(예: 코스피만)을 성공처럼 돌려주면
  * 멀쩡한 이전 값을 덮어쓰게 된다.
  */
-export async function fetchRanking(sort, size, budget, { strict = false } = {}) {
+export async function fetchRanking(sort, size, budget, { strict = false, markets = ['KOSPI', 'KOSDAQ'] } = {}) {
   const pages = Math.ceil(size / 100);
   const jobs = [];
-  for (const market of ['KOSPI', 'KOSDAQ']) {
+  for (const market of markets) {
     for (let p = 1; p <= pages; p++) jobs.push({ market, p });
   }
   const got = await pool(jobs, 6, ({ market, p }) => fetchRankPage(sort, market, p, size, budget));

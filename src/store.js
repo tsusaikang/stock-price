@@ -27,6 +27,14 @@ const MIGRATIONS = [
        updated INTEGER NOT NULL
      )`,
     `CREATE INDEX IF NOT EXISTS series_ugen ON series (ugen)`,
+    // 후보군을 상관계수 계산용으로 미리 포장한 것. meta(JSON)는 종목 목록, data(BLOB)는
+    // Float32 수익률 행렬. 상세 화면이 434행을 꺼내 하나씩 파싱하던 CPU를 없애려는 것.
+    `CREATE TABLE IF NOT EXISTS pack (
+       key     TEXT PRIMARY KEY,
+       meta    TEXT NOT NULL,
+       data    BLOB NOT NULL,
+       updated INTEGER NOT NULL
+     )`,
   ],
 ];
 
@@ -149,4 +157,23 @@ export async function countGen(db, gen) {
 /** 오래 안 쓰인 종목 정리. 급등락 상위는 매일 바뀌어서 그냥 두면 계속 쌓인다. */
 export function pruneSeries(db, olderThanMs) {
   return db.prepare('DELETE FROM series WHERE updated < ?').bind(Date.now() - olderThanMs).run();
+}
+
+// ── pack: 미리 포장한 후보군 ─────────────────────────────────────────
+export async function getPack(db, key) {
+  const row = await db.prepare('SELECT meta, data, updated FROM pack WHERE key = ?').bind(key).first();
+  if (!row) return null;
+  // D1은 BLOB을 ArrayBuffer(또는 숫자 배열)로 돌려준다
+  const buf = row.data instanceof ArrayBuffer ? row.data : new Uint8Array(row.data).buffer;
+  return { meta: JSON.parse(row.meta), data: new Float32Array(buf), updated: row.updated };
+}
+
+export function putPack(db, key, meta, data) {
+  return db
+    .prepare(
+      `INSERT INTO pack (key, meta, data, updated) VALUES (?1, ?2, ?3, ?4)
+       ON CONFLICT (key) DO UPDATE SET meta = excluded.meta, data = excluded.data, updated = excluded.updated`
+    )
+    .bind(key, JSON.stringify(meta), data.buffer, Date.now())
+    .run();
 }

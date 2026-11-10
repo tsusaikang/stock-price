@@ -2,8 +2,9 @@
 // 내보내므로(무료·무제한), 여기로 오는 건 /api/*, /healthz, 그리고 없는 경로뿐이다.
 //
 // 무료 플랜 제약에 맞춘 구조:
-//  - 호출당 외부 요청 50개 → 모든 네이버 호출이 Budget(45)을 차감한다.
-//  - 호출당 CPU 10ms → 무거운 일(후보군 440종목)은 여러 호출로 쪼갠다(universe.js).
+//  - 호출당 외부 요청 50개 → 모든 네이버 호출이 Budget을 차감한다.
+//  - 호출당 CPU 10ms → 실측상 외부 요청 1개 ≈ 1ms라서, 호출 하나에 요청 ~10개까지로 묶는다.
+//    무거운 일(후보군 440종목, 스파크라인 보충)은 cron이 1분에 한 덩어리씩 나눠 한다.
 //  - 메모리 캐시를 믿을 수 없음 → 화면 스냅숏과 종가는 D1에 둔다(store.js).
 //  - cron은 어디서 돌지 모른다 → 사용자가 기다리는 경로에는 넣지 않고, 미리 데우는 데만 쓴다.
 
@@ -18,16 +19,18 @@ import {
   json,
 } from './util.js';
 import { fetchBasic, fetchIntegration, fetchDaily, fetchQuotes, search, fetchIndex, fetchRanking } from './naver.js';
-import { dbOrNull, getBlob, getUniverse, getSeries, putSeries, acquireLease, releaseLease, countGen } from './store.js';
-import { HOME_KEY, refreshPrices, backfillSparks, refreshHome, sparkOf, RETRY_MS } from './home.js';
-import { findRelated } from './related.js';
-import { getState, needsWork, step, toSeries } from './universe.js';
+import { dbOrNull, getBlob, getUniverse, getSeries, putSeries, acquireLease, releaseLease, countGen, getPack } from './store.js';
+import { HOME_KEY, refreshPrices, backfillSaved, sparkOf, RETRY_MS } from './home.js';
+import { findRelated, unpack } from './related.js';
+import { getState, needsWork, step, toSeries, STEP_FETCHES, PACK_KEY } from './universe.js';
 
 const LOCK = 'home_lock';
 const LOCK_TTL = 30_000;
-// 장중엔 cron이 1분마다 데우므로 사용자 요청이 갱신을 거들 일은 cron이 멈췄을 때뿐이다.
+// 장중엔 cron이 2분마다 가격을 데우므로 사용자 요청이 갱신을 거들 일은 cron이 멈췄을 때뿐이다.
 const MAX_AGE_SESSION = 3 * 60_000;
 const MAX_AGE_OFF = 15 * 60_000;
+const CRON_PRICE_EVERY = 100_000; // 장중 가격 갱신 간격(약 2분). 사이 분에는 스파크라인을 보충한다.
+const PRICE_FETCHES = 9; // 지수 1 + 랭킹 8
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -40,21 +43,37 @@ class HttpError extends Error {
 const homeResponse = (snap, extra = {}) =>
   json({ ...snap, fetchedAt: snap.fetchedAt, updatedAt: new Date().toISOString(), ...extra });
 
-/** 잠금을 잡고 첫 화면 전체 갱신. 다른 곳이 갱신 중이면 아무것도 안 한다. */
+/** 잠금을 잡고 첫 화면 가격 갱신. 다른 곳이 갱신 중이면 아무것도 안 한다. */
 async function refreshLocked(db, budget, prev) {
   if (!(await acquireLease(db, LOCK, LOCK_TTL))) return null;
   try {
-    return await refreshHome(db, budget, prev);
+    return (await refreshPrices(db, budget, prev)).snap;
   } finally {
     await releaseLease(db, LOCK).catch(() => {});
   }
+}
+
+/**
+ * 상관계수 후보군. 하루 한 번 만드는 포장본(Float32 행렬 1행)을 읽고, 같은 인스턴스 안에서는
+ * 10분간 메모리에 둔다. 434행을 D1에서 꺼내 하나씩 파싱하던 것이 상세 화면 CPU의 대부분이었다.
+ * 포장본이 아직 없으면(첫 배포 직후 등) 행 단위로 읽는다.
+ */
+let universeMemo = null;
+async function loadUniverse(db) {
+  if (universeMemo && Date.now() - universeMemo.at < 10 * 60_000) return universeMemo.rows;
+  const pack = await getPack(db, PACK_KEY).catch(() => null);
+  if (pack) {
+    universeMemo = { rows: unpack(pack), at: Date.now() };
+    return universeMemo.rows;
+  }
+  return getUniverse(db, daysBefore(lastClosedDay(), 10)).catch(() => []);
 }
 
 const routes = {
   /**
    * 첫 화면.
    * - 저장분이 없거나, 장 상태가 어긋났으면(아침에 어제 마감 화면 등) 기다려서 새로 받는다.
-   *   가격 단계만 기다리고(서울 근처 0.3~1초) 스파크라인 보충은 응답 뒤에 한다.
+   *   가격 단계만 기다린다(서울 근처 0.3~1초). 스파크라인 보충은 cron 몫이다.
    * - 그냥 묵은 정도면 저장분을 바로 주고 뒤에서 갱신, 응답에 stale:true를 붙인다.
    *   화면(app.js)은 stale이면 2.5초 뒤 한 번 더 받는다.
    */
@@ -72,19 +91,15 @@ const routes = {
 
     if (!saved || (age > 60_000 && phaseMismatch(saved.value, now))) {
       if (await acquireLease(db, LOCK, LOCK_TTL)) {
-        const budget = new Budget();
         try {
-          const phase1 = await refreshPrices(db, budget, saved?.value, now);
-          ctx.waitUntil(
-            backfillSparks(db, budget, phase1)
-              .catch((err) => console.error('backfill', err.message))
-              .finally(() => releaseLease(db, LOCK).catch(() => {}))
-          );
-          return homeResponse(phase1.snap);
+          // 가격만 기다린다. 비어 있는 스파크라인은 cron이 다음 분부터 채운다.
+          const { snap } = await refreshPrices(db, new Budget(PRICE_FETCHES), saved?.value, now);
+          return homeResponse(snap);
         } catch (err) {
-          await releaseLease(db, LOCK).catch(() => {});
           if (!saved) throw err;
           console.error('sync refresh failed, serving saved', err.message);
+        } finally {
+          await releaseLease(db, LOCK).catch(() => {});
         }
       }
       if (saved) return homeResponse(saved.value, { stale: true });
@@ -93,7 +108,9 @@ const routes = {
 
     const maxAge = inSession(now) ? MAX_AGE_SESSION : MAX_AGE_OFF;
     if (age > maxAge) {
-      ctx.waitUntil(refreshLocked(db, new Budget(), saved.value).catch((err) => console.error('home', err.message)));
+      ctx.waitUntil(
+        refreshLocked(db, new Budget(PRICE_FETCHES), saved.value).catch((err) => console.error('home', err.message))
+      );
       return homeResponse(saved.value, { stale: true });
     }
     return homeResponse(saved.value);
@@ -127,7 +144,7 @@ const routes = {
           const row = stored.get(q.code);
           return !row || (row.last < need && now - (row.updated ?? 0) > RETRY_MS);
         })
-        .slice(0, budget.left);
+        .slice(0, Math.min(budget.left, 5)); // CPU 때문에 한 번에 5개까지, 나머지는 다음에
       if (todo.length) {
         const got = await Promise.all(todo.map((q) => fetchDaily(q.code, 60, budget).catch(() => null)));
         const rows = [];
@@ -160,7 +177,7 @@ const routes = {
       fetchBasic(code, budget),
       fetchIntegration(code, budget).catch(() => ({ totals: [], industryPeers: [] })),
       fetchDaily(code, 400, budget),
-      db ? getUniverse(db, daysBefore(lastClosedDay(), 10)).catch(() => []) : [],
+      db ? loadUniverse(db) : [],
     ]);
 
     const rel = findRelated(code, ohlcv, universe);
@@ -173,16 +190,6 @@ const routes = {
         const q = live.get(s.code);
         if (q) Object.assign(s, { rate: q.rate, price: q.price });
       }
-    }
-
-    // 후보군 일봉이 덜 찼으면 남은 예산으로 한 묶음 (가벼운 daily 단계만; 응답은 기다리지 않는다)
-    if (db) {
-      ctx.waitUntil(
-        getState(db)
-          .then((st) => (needsWork(st) ? step(db, budget, { lists: false }) : null))
-          .then((r) => r && r.did !== 'skip' && console.log(JSON.stringify({ universe: r, via: 'stock' })))
-          .catch((err) => console.error('universe step', err.message))
-      );
     }
 
     return json({
@@ -209,7 +216,7 @@ const routes = {
     const db = await dbOrNull(env);
     if (!db) throw new HttpError(503, 'D1을 쓸 수 없습니다');
     const before = await getState(db);
-    const result = needsWork(before) ? await step(db, new Budget()) : { did: 'none' };
+    const result = needsWork(before) ? await step(db, new Budget(STEP_FETCHES)) : { did: 'none' };
     const st = await getState(db);
     const gen = lastClosedDay();
     return json({
@@ -221,7 +228,7 @@ const routes = {
       saved: st?.gen ? await countGen(db, st.gen) : 0, // 실제로 저장된 종목 수 (실패분 제외)
       retry: st?.retry?.length ?? 0,
       dropped: st?.dropped ?? 0,
-      done: !!st?.done && st.gen === gen,
+      done: st?.phase === 'done' && st.gen === gen,
       started: st?.started ? new Date(st.started).toISOString() : null,
       finished: st?.finished ? new Date(st.finished).toISOString() : null,
     });
@@ -314,32 +321,40 @@ export default {
   },
 
   /**
-   * cron (한국 08:00~17:59, 1분마다). 할 일은 시각을 보고 고른다.
-   *  - 장중(평일 08:30~15:45): 첫 화면 갱신 → 사용자가 열 때 이미 1~2분 안쪽 값
-   *  - 그 밖: 장 상태가 바뀌었으면(마감 직후 등) 첫 화면 한 번, 그리고 후보군 재구축 한 단계
-   * cron은 어느 데이터센터에서 돌지 모르니 느릴 수 있다. 그래서 시한을 넉넉히(10분) 둔다.
+   * cron (한국 08:00~17:59, 1분마다). 한 번에 **한 덩어리**만 한다 — 무료 플랜 CPU 10ms가
+   * 외부 요청 개수에 거의 비례해서(1개 ≈ 1ms), 두 가지를 겹치면 넘친다.
+   *
+   *   장중(평일 08:30~15:45): 가격이 100초 넘게 묵었으면 가격 갱신(요청 9), 아니면 스파크라인 보충(≤8)
+   *                           → 가격은 약 2분마다, 사이 분에 스파크라인
+   *   그 밖:                  장 상태가 바뀌었으면 가격 한 번 → 아니면 후보군 재구축 한 단계(≤10)
+   *                           → 아니면 스파크라인 보충
+   * cron은 어느 데이터센터에서 돌지 모르니 느릴 수 있다. 시한은 넉넉히(5분) 둔다.
    */
   async scheduled(controller, env) {
     const db = await dbOrNull(env);
     if (!db) return;
     const now = Date.now();
-    const budget = new Budget(undefined, { deadlineMs: 10 * 60_000 });
+    const log = (o) => console.log(JSON.stringify({ cron: controller.cron, ...o }));
+    const budgetOf = (n) => new Budget(n, { deadlineMs: 5 * 60_000 });
 
     const saved = await getBlob(db, HOME_KEY);
     const age = saved ? now - saved.updated : Infinity;
-    const homeDue = inSession(now) ? age > 50_000 : age > 60_000 && phaseMismatch(saved?.value, now);
-    if (homeDue) {
-      const t0 = Date.now();
-      const r = await refreshLocked(db, budget, saved?.value).catch((err) => ({ error: err.message }));
-      console.log(JSON.stringify({ cron: 'home', ms: Date.now() - t0, used: budget.used, ...(r?.error ? r : {}) }));
+    const session = inSession(now);
+
+    const pricesDue = session ? age > CRON_PRICE_EVERY : age > 60_000 && phaseMismatch(saved?.value, now);
+    if (pricesDue) {
+      const r = await refreshLocked(db, budgetOf(PRICE_FETCHES), saved?.value).catch((err) => ({ error: err.message }));
+      return log({ did: 'prices', ...(r?.error ? r : { skipped: r === null }) });
     }
 
-    if (!inSession(now) && budget.left >= 10) {
+    if (!session) {
       const st = await getState(db);
-      if (needsWork(st, now)) {
-        const r = await step(db, budget, { now });
-        console.log(JSON.stringify({ cron: 'universe', ...r }));
-      }
+      if (needsWork(st, now)) return log({ did: 'universe', ...(await step(db, budgetOf(STEP_FETCHES), { now })) });
+    }
+
+    if (saved) {
+      const r = await backfillSaved(db, budgetOf(8), saved.value, now).catch((err) => ({ error: err.message }));
+      if (r) log({ did: 'backfill', ...(r.error ? r : {}) });
     }
   },
 };

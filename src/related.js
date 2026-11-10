@@ -50,9 +50,38 @@ function correlation(a, b) {
 }
 
 /**
+ * 후보군을 상관계수 계산용으로 포장한다. 하루 한 번(후보군 재구축이 끝났을 때) 만든다.
+ * 행마다 마지막 CORR_WINDOW개 수익률을 Float32로, 모자라면 앞을 NaN으로 채운다.
+ * @returns {{meta: {window:number, rows:[code,name,market,last][]}, data: Float32Array}}
+ */
+export function buildPack(universe) {
+  const W = CORR_WINDOW;
+  const rows = [];
+  const data = new Float32Array(universe.length * W).fill(NaN);
+  universe.forEach((u, i) => {
+    const r = returns(u.closes).slice(-W);
+    data.set(r, i * W + (W - r.length));
+    rows.push([u.code, u.name, u.market, u.last]);
+  });
+  return { meta: { window: W, rows }, data };
+}
+
+/** 포장본을 findRelated가 받는 모양으로 (행마다 수익률 배열을 바로 넘긴다 — 파싱 없음) */
+export function unpack(pack) {
+  const W = pack.meta.window;
+  return pack.meta.rows.map(([code, name, market, last], i) => {
+    const seg = pack.data.subarray(i * W, (i + 1) * W);
+    let start = 0;
+    while (start < W && Number.isNaN(seg[start])) start++;
+    return { code, name, market, last, rets: seg.subarray(start) };
+  });
+}
+
+/**
  * @param {string} code 기준 종목
  * @param {{d:string,c:number}[]} baseRows 기준 종목 일봉 (날짜 오름차순, 장중이면 오늘 봉 포함)
- * @param {{code,name,market,last,closes:number[]}[]} universe 후보군 (마감된 봉만, last = 마지막 날짜)
+ * @param {{code,name,market,last,closes?:number[],rets?:Float32Array}[]} universe 후보군
+ *   (마감된 봉만, last = 마지막 날짜). 포장본(unpack)이면 rets, D1 행이면 closes.
  *
  * 후보마다 자기 마지막 날짜(last)에 맞춰 기준 종목을 자른 뒤 비교한다. 위치로만 맞추면
  * 장중엔 기준 종목에만 오늘 봉이 붙어 있어서 하루씩 어긋난 값끼리 비교하게 된다
@@ -79,7 +108,7 @@ export function findRelated(code, baseRows, universe, { top = 6 } = {}) {
       base = returns(baseCloses.slice(Math.max(0, idx - CORR_WINDOW), idx + 1));
       windows.set(idx, base);
     }
-    const r = correlation(base, returns(u.closes).slice(-CORR_WINDOW));
+    const r = correlation(base, u.rets ?? returns(u.closes).slice(-CORR_WINDOW));
     if (r === null) continue;
     used.set(idx, (used.get(idx) ?? 0) + 1);
     scored.push({ code: u.code, name: u.name, market: u.market, corr: Number(r.toFixed(3)) });

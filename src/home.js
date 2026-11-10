@@ -1,13 +1,13 @@
 // 첫 화면 데이터(지수 + 급등·급락·이슈·시총)와 스파크라인.
 //
-// 갱신은 두 번에 나눠 저장한다.
-//   1) 가격: 지수 2 + 랭킹 8 = 외부 요청 10개. 스파크라인은 D1에 있는 것(+ 이전 화면 것)으로.
+// 갱신은 두 단계이고 서로 다른 호출에서 한다.
+//   1) 가격: 지수(일괄 1) + 랭킹 8 = 외부 요청 9개. 스파크라인은 D1에 있는 것(+ 이전 화면 것)으로.
 //      → 바로 저장. 사용자가 보는 가격은 여기서 최신이 된다.
-//   2) 스파크라인 보충: D1에 없거나 묵은 종목의 일봉을 남은 예산만큼 받아 다시 저장.
-// 한 번에 다 하고 마지막에 저장하면, 느린 날 30초 시한을 넘겨 전부 날아간다.
+//   2) 스파크라인 보충: D1에 없거나 묵은 종목의 일봉을 8개까지 받아 다시 저장.
+// 무료 플랜 CPU 10ms는 외부 요청 개수에 거의 비례해서(요청 1개 ≈ 1ms) 한 호출에 둘 다 하면 넘친다.
 
 import { lastClosedDay, sessionDayGuess, ymdOfIso, pool } from './util.js';
-import { fetchIndex, fetchRanking, fetchDaily } from './naver.js';
+import { fetchIndices, fetchRanking, fetchDaily } from './naver.js';
 import { getSeries, putSeries, putBlob } from './store.js';
 import { toSeries } from './universe.js';
 
@@ -16,12 +16,15 @@ const LIST_N = 15;
 const SPARK_POINTS = 30;
 const SPARK_DAYS = 60; // 달력 기준 → 거래일 약 40일
 export const RETRY_MS = 3 * 3_600_000;
+export const BACKFILL_MAX = 8;
 
+// [화면 칸, 랭킹 종류, 시장별 개수]. 급등·급락은 ETF·ETN을 걸러내면 많이 줄어서(폭락일엔 코스피
+// 하락 상위 30 중 실제 종목이 1개였다) 30씩 받는다. 시총은 합쳐서 15위까지라 코스피 15면 된다.
 const LISTS = [
   ['up', 'up', 30],
   ['down', 'down', 30],
-  ['issue', 'searchTop', 20],
-  ['cap', 'marketValue', 20],
+  ['issue', 'searchTop', 10],
+  ['cap', 'marketValue', 15],
 ];
 
 /**
@@ -63,18 +66,21 @@ const unique = (lists) => {
  * 반쪽짜리(예: 코스피만 있는 급등 목록)를 저장해서 멀쩡한 화면을 덮어쓰지 않으려는 것.
  */
 export async function refreshPrices(db, budget, prev, now = Date.now()) {
-  const [kospi, kosdaq, ...ranked] = await Promise.allSettled([
-    fetchIndex('KOSPI', budget),
-    fetchIndex('KOSDAQ', budget),
+  const [idx, ...ranked] = await Promise.allSettled([
+    fetchIndices(budget),
     ...LISTS.map(([, sort, size]) => fetchRanking(sort, size, budget, { strict: true })),
   ]);
 
   const failed = [];
-  const prevIdx = (code) => prev?.indices?.find((i) => i.code === code) ?? null;
-  const indices = [
-    kospi.status === 'fulfilled' ? kospi.value : (failed.push('KOSPI'), prevIdx('KOSPI')),
-    kosdaq.status === 'fulfilled' ? kosdaq.value : (failed.push('KOSDAQ'), prevIdx('KOSDAQ')),
-  ].filter(Boolean);
+  const got = idx.status === 'fulfilled' ? idx.value : [];
+  const indices = ['KOSPI', 'KOSDAQ']
+    .map((code) => {
+      const fresh = got.find((i) => i.code === code);
+      if (fresh) return fresh;
+      failed.push(code);
+      return prev?.indices?.find((i) => i.code === code) ?? null;
+    })
+    .filter(Boolean);
 
   const lists = {};
   LISTS.forEach(([name], i) => {
@@ -114,7 +120,7 @@ export async function backfillSparks(db, budget, { snap, stored, sessionDay }, n
     const row = stored.get(s.code);
     return !row || (row.last < need && now - (row.updated ?? 0) > RETRY_MS);
   });
-  const todo = stale.slice(0, Math.max(0, budget.left));
+  const todo = stale.slice(0, Math.max(0, Math.min(budget.left, BACKFILL_MAX)));
   if (!todo.length) return snap;
 
   const got = await pool(todo, 6, (s) => fetchDaily(s.code, SPARK_DAYS, budget));
@@ -132,8 +138,19 @@ export async function backfillSparks(db, budget, { snap, stored, sessionDay }, n
   return next;
 }
 
-/** 1+2단계를 이어서 (cron·응답 뒤 갱신용) */
-export async function refreshHome(db, budget, prev, now = Date.now()) {
-  const phase1 = await refreshPrices(db, budget, prev, now);
-  return backfillSparks(db, budget, phase1, now);
+/** 스파크라인 보충이 필요한 종목이 있나 (cron이 이번 분에 할 일을 고를 때) */
+export function needsBackfill(snap, stored, now = Date.now()) {
+  const need = lastClosedDay(now);
+  return unique(snap.lists).some((s) => {
+    const row = stored.get(s.code);
+    return !row || (row.last < need && now - (row.updated ?? 0) > RETRY_MS);
+  });
+}
+
+/** 저장된 화면을 기준으로 스파크라인만 보충 (cron용, 가격은 다시 받지 않는다) */
+export async function backfillSaved(db, budget, snap, now = Date.now()) {
+  const stored = await getSeries(db, unique(snap.lists).map((s) => s.code));
+  if (!needsBackfill(snap, stored, now)) return null;
+  const sessionDay = ymdOfIso(snap.indices?.[0]?.tradedAt) ?? sessionDayGuess(now);
+  return backfillSparks(db, budget, { snap, stored, sessionDay }, now);
 }
